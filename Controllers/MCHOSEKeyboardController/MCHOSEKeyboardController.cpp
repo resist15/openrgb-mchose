@@ -1,7 +1,7 @@
 /*---------------------------------------------------------*\
 | MCHOSEKeyboardController.cpp                              |
 |                                                           |
-|   Driver for MCHOSE keyboards (2.4G receiver protocol)    |
+|   Driver for MCHOSE keyboards (2.4G receiver and wired)   |
 |                                                           |
 |   Sourav Jagtap                               14 Nov 2026 |
 |                                                           |
@@ -9,21 +9,28 @@
 |   SPDX-License-Identifier: GPL-2.0-or-later               |
 \*---------------------------------------------------------*/
 
-#include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <thread>
 #include "MCHOSEKeyboardController.h"
 #include "StringUtils.h"
 
 #define MCHOSE_READ_TIMEOUT_MS          1000
 #define MCHOSE_ECHO_TIMEOUT_MS          100
+#define MCHOSE_WIRED_WRITE_DELAY_MS     50
 
-MCHOSEKeyboardController::MCHOSEKeyboardController(hid_device* dev_handle, const char* path, std::string dev_name)
+MCHOSEKeyboardController::MCHOSEKeyboardController(hid_device* dev_handle, const char* path, std::string dev_name, bool is_wired)
 {
     dev         = dev_handle;
     location    = path;
     name        = dev_name;
+    wired       = is_wired;
     state_valid = false;
+
+    memset(performance,         0x00, sizeof(performance));
+    memset(light_color,         0x00, sizeof(light_color));
+    memset(performance_header,  0x00, sizeof(performance_header));
+    memset(light_color_header,  0x00, sizeof(light_color_header));
 
     ReadState();
 }
@@ -63,19 +70,37 @@ std::string MCHOSEKeyboardController::GetSerialString()
 \*---------------------------------------------------------*/
 bool MCHOSEKeyboardController::ReadState()
 {
-    std::vector<unsigned char> new_performance;
-    std::vector<unsigned char> new_light_color;
+    unsigned char new_performance[MCHOSE_PERFORMANCE_SIZE];
+    unsigned char new_light_color[MCHOSE_WIRED_LIGHT_COLOR_SIZE];
+    unsigned char new_performance_header[MCHOSE_WIRED_HEADER_SIZE];
+    unsigned char new_light_color_header[MCHOSE_WIRED_HEADER_SIZE];
 
-    state_valid = ReadBlock(MCHOSE_CMD_GET_PERFORMANCE, new_performance)
-               && ReadBlock(MCHOSE_CMD_GET_LIGHT_COLOR, new_light_color)
-               && new_performance.size() == MCHOSE_PERFORMANCE_SIZE
-               && new_light_color.size() == MCHOSE_LIGHT_COLOR_SIZE;
+    memset(new_light_color,         0x00, sizeof(new_light_color));
+    memset(new_performance_header,  0x00, sizeof(new_performance_header));
+    memset(new_light_color_header,  0x00, sizeof(new_light_color_header));
 
-    if(state_valid)
+    bool success;
+
+    if(wired)
     {
-        performance = new_performance;
-        light_color = new_light_color;
+        success = WiredRead(MCHOSE_WIRED_CMD_PERFORMANCE, MCHOSE_PERFORMANCE_SIZE, new_performance_header, new_performance)
+               && WiredRead(MCHOSE_WIRED_CMD_LIGHT_COLOR, MCHOSE_WIRED_LIGHT_COLOR_SIZE, new_light_color_header, new_light_color);
     }
+    else
+    {
+        success = ReadBlock(MCHOSE_CMD_GET_PERFORMANCE, new_performance, MCHOSE_PERFORMANCE_SIZE)
+               && ReadBlock(MCHOSE_CMD_GET_LIGHT_COLOR, new_light_color, MCHOSE_LIGHT_COLOR_SIZE);
+    }
+
+    if(success)
+    {
+        memcpy(performance,         new_performance,        sizeof(performance));
+        memcpy(light_color,         new_light_color,        sizeof(light_color));
+        memcpy(performance_header,  new_performance_header, sizeof(performance_header));
+        memcpy(light_color_header,  new_light_color_header, sizeof(light_color_header));
+    }
+
+    state_valid = success;
 
     return(state_valid);
 }
@@ -83,6 +108,11 @@ bool MCHOSEKeyboardController::ReadState()
 bool MCHOSEKeyboardController::IsStateValid()
 {
     return(state_valid);
+}
+
+bool MCHOSEKeyboardController::IsWired()
+{
+    return(wired);
 }
 
 int MCHOSEKeyboardController::GetModePairOffset(unsigned char mode)
@@ -137,14 +167,14 @@ unsigned char MCHOSEKeyboardController::GetModeSpeed(unsigned char mode)
 
     if(!state_valid || offset < 0)
     {
-        return(3);
+        return(MCHOSE_SPEED_DEFAULT);
     }
 
     unsigned char speed = performance[offset + 1] >> 4;
 
     if(speed < MCHOSE_SPEED_MIN || speed > MCHOSE_SPEED_MAX)
     {
-        speed = 3;
+        speed = MCHOSE_SPEED_DEFAULT;
     }
 
     return(speed);
@@ -164,9 +194,9 @@ bool MCHOSEKeyboardController::GetModeRandom(unsigned char mode)
 
 RGBColor MCHOSEKeyboardController::GetModeColor(unsigned char mode)
 {
-    unsigned int offset = 21 * mode;
+    unsigned int offset = MCHOSE_MODE_COLOR_STRIDE * mode;
 
-    if(!state_valid || offset + 3 > light_color.size())
+    if(!state_valid || offset + 3 > MCHOSE_LIGHT_COLOR_SIZE)
     {
         return(ToRGBColor(0xFF, 0x00, 0x00));
     }
@@ -195,7 +225,14 @@ void MCHOSEKeyboardController::SetMode(unsigned char mode, unsigned char brightn
     performance[MCHOSE_PERFORMANCE_SIZE - 2] = 0x5A;
     performance[MCHOSE_PERFORMANCE_SIZE - 1] = 0xA5;
 
-    WriteBlock(MCHOSE_CMD_SET_PERFORMANCE, performance, false);
+    if(wired)
+    {
+        WiredWrite(MCHOSE_WIRED_CMD_PERFORMANCE, performance_header, performance, MCHOSE_PERFORMANCE_SIZE);
+    }
+    else
+    {
+        WriteBlock(MCHOSE_CMD_SET_PERFORMANCE, performance, MCHOSE_PERFORMANCE_SIZE, false);
+    }
 }
 
 void MCHOSEKeyboardController::SetModeColor(unsigned char mode, RGBColor color)
@@ -205,9 +242,9 @@ void MCHOSEKeyboardController::SetModeColor(unsigned char mode, RGBColor color)
         return;
     }
 
-    unsigned int offset = 21 * mode;
+    unsigned int offset = MCHOSE_MODE_COLOR_STRIDE * mode;
 
-    if(offset + 3 > light_color.size())
+    if(offset + 3 > MCHOSE_LIGHT_COLOR_SIZE)
     {
         return;
     }
@@ -217,20 +254,33 @@ void MCHOSEKeyboardController::SetModeColor(unsigned char mode, RGBColor color)
     light_color[offset + 2] = RGBGetBValue(color);
 
     /*-----------------------------------------------------*\
-    | The write is the color block followed by 14 zero      |
-    | bytes and a 0x5A 0xA5 terminator block                |
+    | Wired: write back the whole block as it was read,     |
+    | which already ends with the 0x5A 0xA5 terminator      |
     \*-----------------------------------------------------*/
-    std::vector<unsigned char> data(light_color);
-    data.resize(light_color.size() + 2 * MCHOSE_PAYLOAD_SIZE, 0x00);
-    data[light_color.size() + MCHOSE_PAYLOAD_SIZE + 2] = 0x5A;
-    data[light_color.size() + MCHOSE_PAYLOAD_SIZE + 3] = 0xA5;
+    if(wired)
+    {
+        WiredWrite(MCHOSE_WIRED_CMD_LIGHT_COLOR, light_color_header, light_color, MCHOSE_WIRED_LIGHT_COLOR_SIZE);
+        return;
+    }
 
-    WriteBlock(MCHOSE_CMD_SET_LIGHT_COLOR, data, true);
+    /*-----------------------------------------------------*\
+    | Wireless: the color block followed by 14 zero bytes   |
+    | and a 0x5A 0xA5 terminator block                      |
+    \*-----------------------------------------------------*/
+    unsigned char data[MCHOSE_LIGHT_COLOR_SIZE + 2 * MCHOSE_PAYLOAD_SIZE];
+
+    memset(data, 0x00, sizeof(data));
+    memcpy(data, light_color, MCHOSE_LIGHT_COLOR_SIZE);
+
+    data[MCHOSE_LIGHT_COLOR_SIZE + MCHOSE_PAYLOAD_SIZE + 2] = 0x5A;
+    data[MCHOSE_LIGHT_COLOR_SIZE + MCHOSE_PAYLOAD_SIZE + 3] = 0xA5;
+
+    WriteBlock(MCHOSE_CMD_SET_LIGHT_COLOR, data, sizeof(data), true);
 }
 
 void MCHOSEKeyboardController::SetPerKeyColors(const RGBColor* colors)
 {
-    std::vector<unsigned char> data(MCHOSE_PER_KEY_SIZE);
+    unsigned char data[MCHOSE_PER_KEY_SIZE];
 
     for(unsigned int led_idx = 0; led_idx < MCHOSE_PER_KEY_LEDS; led_idx++)
     {
@@ -239,7 +289,16 @@ void MCHOSEKeyboardController::SetPerKeyColors(const RGBColor* colors)
         data[led_idx + 2 * MCHOSE_PER_KEY_LEDS]     = RGBGetBValue(colors[led_idx]);
     }
 
-    WriteBlock(MCHOSE_CMD_SET_PER_KEY, data, false);
+    if(wired)
+    {
+        const unsigned char per_key_header[MCHOSE_WIRED_HEADER_SIZE] = { 0x00, 0x00, 0x01, 0x00, 0x80, 0x01 };
+
+        WiredWrite(MCHOSE_WIRED_CMD_PER_KEY, per_key_header, data, MCHOSE_PER_KEY_SIZE);
+    }
+    else
+    {
+        WriteBlock(MCHOSE_CMD_SET_PER_KEY, data, MCHOSE_PER_KEY_SIZE, false);
+    }
 }
 
 void MCHOSEKeyboardController::SendFrame(unsigned char cmd, unsigned char total, unsigned char index, const unsigned char* payload, unsigned char length)
@@ -271,9 +330,15 @@ void MCHOSEKeyboardController::SendFrame(unsigned char cmd, unsigned char total,
     hid_write(dev, buf, MCHOSE_REPORT_SIZE);
 }
 
-bool MCHOSEKeyboardController::ReadBlock(unsigned char cmd, std::vector<unsigned char>& out)
+bool MCHOSEKeyboardController::ReadBlock(unsigned char cmd, unsigned char* out, unsigned int size)
 {
-    unsigned char buf[64];
+    unsigned char   buf[64];
+    bool            block_received[MCHOSE_MAX_BLOCKS];
+    unsigned int    blocks_total    = 0;
+    unsigned int    blocks_received = 0;
+    unsigned int    bytes_received  = 0;
+
+    memset(block_received, 0, sizeof(block_received));
 
     /*-----------------------------------------------------*\
     | Flush pending input reports                           |
@@ -284,9 +349,7 @@ bool MCHOSEKeyboardController::ReadBlock(unsigned char cmd, std::vector<unsigned
 
     SendFrame(cmd, 0x01, 0x00, NULL, 0);
 
-    std::vector<std::vector<unsigned char>> blocks;
-    unsigned int                            received = 0;
-    auto                                    start    = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
 
     while(std::chrono::steady_clock::now() - start < std::chrono::milliseconds(MCHOSE_READ_TIMEOUT_MS))
     {
@@ -297,48 +360,45 @@ bool MCHOSEKeyboardController::ReadBlock(unsigned char cmd, std::vector<unsigned
             continue;
         }
 
-        unsigned char total  = buf[2];
-        unsigned char index  = buf[3];
-        unsigned char length = buf[4];
+        unsigned int total  = buf[2];
+        unsigned int index  = buf[3];
+        unsigned int length = buf[4];
+        unsigned int offset = index * MCHOSE_PAYLOAD_SIZE;
 
-        if(total == 0 || index >= total || length > MCHOSE_PAYLOAD_SIZE)
+        if(total == 0 || total > MCHOSE_MAX_BLOCKS || index >= total || length > MCHOSE_PAYLOAD_SIZE || offset + length > size)
         {
             continue;
         }
 
-        if(blocks.size() != total)
+        if(blocks_total != total)
         {
-            blocks.assign(total, std::vector<unsigned char>());
-            received = 0;
+            memset(block_received, 0, sizeof(block_received));
+            blocks_total    = total;
+            blocks_received = 0;
+            bytes_received  = 0;
         }
 
-        if(blocks[index].empty() && length > 0)
+        if(!block_received[index])
         {
-            received++;
+            memcpy(&out[offset], &buf[5], length);
+            block_received[index]   = true;
+            blocks_received++;
+            bytes_received         += length;
         }
 
-        blocks[index].assign(&buf[5], &buf[5] + length);
-
-        if(received == total)
+        if(blocks_received == blocks_total)
         {
-            out.clear();
-
-            for(unsigned int block_idx = 0; block_idx < blocks.size(); block_idx++)
-            {
-                out.insert(out.end(), blocks[block_idx].begin(), blocks[block_idx].end());
-            }
-
-            return(true);
+            return(bytes_received == size);
         }
     }
 
     return(false);
 }
 
-void MCHOSEKeyboardController::WriteBlock(unsigned char cmd, const std::vector<unsigned char>& data, bool trim_last)
+void MCHOSEKeyboardController::WriteBlock(unsigned char cmd, const unsigned char* data, unsigned int size, bool trim_last)
 {
     unsigned char   buf[64];
-    unsigned int    total = (unsigned int)((data.size() + MCHOSE_PAYLOAD_SIZE - 1) / MCHOSE_PAYLOAD_SIZE);
+    unsigned int    total = (size + MCHOSE_PAYLOAD_SIZE - 1) / MCHOSE_PAYLOAD_SIZE;
 
     while(hid_read_timeout(dev, buf, sizeof(buf), 0) > 0)
     {
@@ -347,7 +407,12 @@ void MCHOSEKeyboardController::WriteBlock(unsigned char cmd, const std::vector<u
     for(unsigned int index = 0; index < total; index++)
     {
         unsigned int offset = index * MCHOSE_PAYLOAD_SIZE;
-        unsigned int length = (unsigned int)std::min<size_t>(MCHOSE_PAYLOAD_SIZE, data.size() - offset);
+        unsigned int length = size - offset;
+
+        if(length > MCHOSE_PAYLOAD_SIZE)
+        {
+            length = MCHOSE_PAYLOAD_SIZE;
+        }
 
         /*-------------------------------------------------*\
         | Some blocks use the trailing non-zero length for  |
@@ -367,7 +432,7 @@ void MCHOSEKeyboardController::WriteBlock(unsigned char cmd, const std::vector<u
         | Wait for the receiver to echo the frame before    |
         | sending the next one                              |
         \*-------------------------------------------------*/
-        auto start = std::chrono::steady_clock::now();
+        std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
 
         while(std::chrono::steady_clock::now() - start < std::chrono::milliseconds(MCHOSE_ECHO_TIMEOUT_MS))
         {
@@ -379,4 +444,68 @@ void MCHOSEKeyboardController::WriteBlock(unsigned char cmd, const std::vector<u
             }
         }
     }
+}
+
+bool MCHOSEKeyboardController::WiredRead(unsigned char cmd, unsigned int size, unsigned char* header, unsigned char* out)
+{
+    unsigned char buf[MCHOSE_WIRED_REPORT_SIZE];
+
+    if(size > MCHOSE_WIRED_REPORT_SIZE - MCHOSE_WIRED_DATA_OFFSET)
+    {
+        return(false);
+    }
+
+    memset(buf, 0x00, sizeof(buf));
+
+    buf[0] = MCHOSE_WIRED_REPORT_ID;
+    buf[1] = cmd | MCHOSE_WIRED_READ_FLAG;
+    buf[4] = 0x01;
+    buf[6] = size & 0xFF;
+    buf[7] = (size >> 8) & 0xFF;
+
+    if(hid_send_feature_report(dev, buf, sizeof(buf)) < 0)
+    {
+        return(false);
+    }
+
+    memset(buf, 0x00, sizeof(buf));
+    buf[0] = MCHOSE_WIRED_REPORT_ID;
+
+    int received = hid_get_feature_report(dev, buf, sizeof(buf));
+
+    if(received < (int)(MCHOSE_WIRED_DATA_OFFSET + size) || buf[1] != (cmd | MCHOSE_WIRED_READ_FLAG))
+    {
+        return(false);
+    }
+
+    memcpy(header, &buf[2], MCHOSE_WIRED_HEADER_SIZE);
+    memcpy(out, &buf[MCHOSE_WIRED_DATA_OFFSET], size);
+
+    return(true);
+}
+
+void MCHOSEKeyboardController::WiredWrite(unsigned char cmd, const unsigned char* header, const unsigned char* data, unsigned int size)
+{
+    unsigned char buf[MCHOSE_WIRED_REPORT_SIZE];
+
+    if(size > MCHOSE_WIRED_REPORT_SIZE - MCHOSE_WIRED_DATA_OFFSET)
+    {
+        return;
+    }
+
+    memset(buf, 0x00, sizeof(buf));
+
+    buf[0] = MCHOSE_WIRED_REPORT_ID;
+    buf[1] = cmd;
+    memcpy(&buf[2], header, MCHOSE_WIRED_HEADER_SIZE);
+    memcpy(&buf[MCHOSE_WIRED_DATA_OFFSET], data, size);
+
+    hid_send_feature_report(dev, buf, sizeof(buf));
+
+    /*-----------------------------------------------------*\
+    | The keyboard resets if a per-key write arrives right  |
+    | after switching to custom mode, so give it time to    |
+    | process each write                                    |
+    \*-----------------------------------------------------*/
+    std::this_thread::sleep_for(std::chrono::milliseconds(MCHOSE_WIRED_WRITE_DELAY_MS));
 }

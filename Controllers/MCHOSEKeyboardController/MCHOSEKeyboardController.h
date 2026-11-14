@@ -1,7 +1,7 @@
 /*---------------------------------------------------------*\
 | MCHOSEKeyboardController.h                                |
 |                                                           |
-|   Driver for MCHOSE keyboards (2.4G receiver protocol)    |
+|   Driver for MCHOSE keyboards (2.4G receiver and wired)   |
 |                                                           |
 |   Sourav Jagtap                               14 Nov 2026 |
 |                                                           |
@@ -12,7 +12,6 @@
 #pragma once
 
 #include <string>
-#include <vector>
 #include <hidapi.h>
 #include "RGBController.h"
 
@@ -27,6 +26,27 @@
 #define MCHOSE_REPORT_ID                0x13
 #define MCHOSE_REPORT_SIZE              20
 #define MCHOSE_PAYLOAD_SIZE             14
+
+/*---------------------------------------------------------*\
+| Wired layout (HID feature report 0x06, 520 bytes)         |
+|   [0x06][cmd][6 byte header][data]                        |
+| Reads send [0x06][cmd | 0x80][00 00 01 00 len_lo len_hi]  |
+| and fetch the feature report back. Writes reuse the       |
+| header returned by the matching read.                     |
+\*---------------------------------------------------------*/
+#define MCHOSE_WIRED_REPORT_ID          0x06
+#define MCHOSE_WIRED_REPORT_SIZE        520
+#define MCHOSE_WIRED_HEADER_SIZE        6
+#define MCHOSE_WIRED_DATA_OFFSET        (2 + MCHOSE_WIRED_HEADER_SIZE)
+#define MCHOSE_WIRED_LIGHT_COLOR_SIZE   512
+#define MCHOSE_WIRED_READ_FLAG          0x80
+
+enum
+{
+    MCHOSE_WIRED_CMD_PERFORMANCE        = 0x04,
+    MCHOSE_WIRED_CMD_PER_KEY            = 0x06,
+    MCHOSE_WIRED_CMD_LIGHT_COLOR        = 0x0A,
+};
 
 enum
 {
@@ -74,6 +94,8 @@ enum
 #define MCHOSE_LIGHT_COLOR_SIZE         490
 #define MCHOSE_PER_KEY_LEDS             126
 #define MCHOSE_PER_KEY_SIZE             (3 * MCHOSE_PER_KEY_LEDS)
+#define MCHOSE_MAX_BLOCKS               64
+#define MCHOSE_MODE_COLOR_STRIDE        21
 
 #define MCHOSE_PERF_LIGHT_TYPE          9
 #define MCHOSE_PERF_LIGHT_MODE          10
@@ -82,12 +104,13 @@ enum
 #define MCHOSE_BRIGHTNESS_MAX           9
 #define MCHOSE_SPEED_MIN                1
 #define MCHOSE_SPEED_MAX                4
+#define MCHOSE_SPEED_DEFAULT            3
 #define MCHOSE_MULTICOLOR_ON            7
 
 class MCHOSEKeyboardController
 {
 public:
-    MCHOSEKeyboardController(hid_device* dev_handle, const char* path, std::string dev_name);
+    MCHOSEKeyboardController(hid_device* dev_handle, const char* path, std::string dev_name, bool is_wired);
     ~MCHOSEKeyboardController();
 
     std::string GetDeviceLocation();
@@ -96,6 +119,7 @@ public:
 
     bool        ReadState();
     bool        IsStateValid();
+    bool        IsWired();
 
     unsigned char   GetActiveMode();
     unsigned char   GetModeBrightness(unsigned char mode);
@@ -112,13 +136,19 @@ private:
     std::string     location;
     std::string     name;
 
-    bool                        state_valid;
-    std::vector<unsigned char>  performance;
-    std::vector<unsigned char>  light_color;
+    bool            wired;
+    bool            state_valid;
+    unsigned char   performance[MCHOSE_PERFORMANCE_SIZE];
+    unsigned char   light_color[MCHOSE_WIRED_LIGHT_COLOR_SIZE];
+    unsigned char   performance_header[MCHOSE_WIRED_HEADER_SIZE];
+    unsigned char   light_color_header[MCHOSE_WIRED_HEADER_SIZE];
 
     int         GetModePairOffset(unsigned char mode);
 
     void        SendFrame(unsigned char cmd, unsigned char total, unsigned char index, const unsigned char* payload, unsigned char length);
-    bool        ReadBlock(unsigned char cmd, std::vector<unsigned char>& out);
-    void        WriteBlock(unsigned char cmd, const std::vector<unsigned char>& data, bool trim_last);
+    bool        ReadBlock(unsigned char cmd, unsigned char* out, unsigned int size);
+    void        WriteBlock(unsigned char cmd, const unsigned char* data, unsigned int size, bool trim_last);
+
+    bool        WiredRead(unsigned char cmd, unsigned int size, unsigned char* header, unsigned char* out);
+    void        WiredWrite(unsigned char cmd, const unsigned char* header, const unsigned char* data, unsigned int size);
 };

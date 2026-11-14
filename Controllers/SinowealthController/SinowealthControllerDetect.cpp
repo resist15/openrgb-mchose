@@ -26,6 +26,8 @@
 #include "RGBController_SinowealthKeyboard90.h"
 #include "RGBController_SinowealthGMOW.h"
 #include "RGBController_GenesisXenon200.h"
+#include "MCHOSEKeyboardController.h"
+#include "RGBController_MCHOSEKeyboard.h"
 #include <hidapi.h>
 #include <set>
 #include "LogManager.h"
@@ -45,6 +47,11 @@
 #define GENESIS_THOR_300_PID                0x0090
 #define GENESIS_XENON_200_PID               0x1007
 #define RGB_KEYBOARD_010CPID                0x010C
+
+/*---------------------------------------------------------*\
+| Model IDs on PID 010C handled by other drivers            |
+\*---------------------------------------------------------*/
+#define MCHOSE_G75_PRO_MODEL_ID             0x15
 
 #define MAX_EXPECTED_REPORT_SIZE 2048
 
@@ -425,7 +432,14 @@ DetectedControllers DetectSinowealthKeyboard10c(hid_device_info* info, const std
 
         if(dev)
         {
-            if(sinowealth_10c_keyboards.find(model_id) != sinowealth_10c_keyboards.end())
+            if(model_id == MCHOSE_G75_PRO_MODEL_ID)
+            {
+                MCHOSEKeyboardController*     controller     = new MCHOSEKeyboardController(dev, info->path, "MCHOSE G75 Pro (USB)", true);
+                RGBController_MCHOSEKeyboard* rgb_controller = new RGBController_MCHOSEKeyboard(controller, [dev_path = reports.at(0).dev_path](){ SinowealthUnclaimDevice(dev_path); });
+
+                detected_controllers.push_back(rgb_controller);
+            }
+            else if(sinowealth_10c_keyboards.find(model_id) != sinowealth_10c_keyboards.end())
             {
                 SinowealthKeyboard10cController*     controller     = new SinowealthKeyboard10cController(dev, info->path, sinowealth_10c_keyboards.at(model_id).device_name);
                 RGBController_SinowealthKeyboard10c* rgb_controller = new RGBController_SinowealthKeyboard10c(controller, model_id, [dev_path = reports.at(0).dev_path](){ SinowealthUnclaimDevice(dev_path); });

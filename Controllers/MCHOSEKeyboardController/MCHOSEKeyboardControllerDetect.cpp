@@ -21,6 +21,9 @@
 
 /*---------------------------------------------------------*\
 | MCHOSE product IDs                                        |
+|   Over USB the keyboard enumerates as 258A:010C and is    |
+|   detected by DetectSinowealthKeyboard10c, which hands it |
+|   to this driver by model ID                              |
 \*---------------------------------------------------------*/
 #define MCHOSE_2_4G_RECEIVER_PID                    0x2001
 
@@ -33,7 +36,7 @@ DetectedControllers DetectMCHOSEKeyboard(hid_device_info* info, const std::strin
 
     if(dev)
     {
-        MCHOSEKeyboardController*     controller     = new MCHOSEKeyboardController(dev, info->path, name);
+        MCHOSEKeyboardController*     controller     = new MCHOSEKeyboardController(dev, info->path, name, false);
         RGBController_MCHOSEKeyboard* rgb_controller = new RGBController_MCHOSEKeyboard(controller);
 
         detected_controllers.push_back(rgb_controller);

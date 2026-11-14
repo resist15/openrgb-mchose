@@ -124,16 +124,18 @@ static const mchose_key mchose_g75_pro_keys[] =
     @category Keyboard
     @type USB
     @save :white_check_mark:
-    @direct :white_check_mark:
+    @direct :x:
     @effects :white_check_mark:
-    @detectors DetectMCHOSEKeyboard
-    @comment Supported through the 2.4G wireless receiver. Direct mode
-        writes the keyboard's custom per-key lighting table.
+    @detectors DetectMCHOSEKeyboard, DetectSinowealthKeyboard10c
+    @comment Supported over the 2.4G wireless receiver and USB cable.
+        Custom mode writes the keyboard's stored per-key lighting table.
+        While charging over USB, the Esc key shows the charge indicator.
 \*-------------------------------------------------------------------*/
 
-RGBController_MCHOSEKeyboard::RGBController_MCHOSEKeyboard(MCHOSEKeyboardController* controller_ptr)
+RGBController_MCHOSEKeyboard::RGBController_MCHOSEKeyboard(MCHOSEKeyboardController* controller_ptr, std::function<void()> destroy_callback)
 {
     controller          = controller_ptr;
+    on_destroy          = destroy_callback;
 
     name                = controller->GetDeviceName();
     vendor              = "MCHOSE";
@@ -142,12 +144,12 @@ RGBController_MCHOSEKeyboard::RGBController_MCHOSEKeyboard(MCHOSEKeyboardControl
     location            = controller->GetDeviceLocation();
     serial              = controller->GetSerialString();
 
-    mode Direct;
-    Direct.name         = "Direct";
-    Direct.value        = MCHOSE_MODE_CUSTOM;
-    Direct.flags        = MODE_FLAG_HAS_PER_LED_COLOR | MODE_FLAG_AUTOMATIC_SAVE;
-    Direct.color_mode   = MODE_COLORS_PER_LED;
-    modes.push_back(Direct);
+    mode Custom;
+    Custom.name         = "Custom";
+    Custom.value        = MCHOSE_MODE_CUSTOM;
+    Custom.flags        = MODE_FLAG_HAS_PER_LED_COLOR | MODE_FLAG_AUTOMATIC_SAVE;
+    Custom.color_mode   = MODE_COLORS_PER_LED;
+    modes.push_back(Custom);
 
     AddEffectMode("Static",           MCHOSE_MODE_STATIC,        true,  false, true );
     AddEffectMode("Breathing",        MCHOSE_MODE_BREATHING,     true,  true,  true );
@@ -193,6 +195,11 @@ RGBController_MCHOSEKeyboard::~RGBController_MCHOSEKeyboard()
     Shutdown();
 
     delete controller;
+
+    if(on_destroy)
+    {
+        on_destroy();
+    }
 }
 
 void RGBController_MCHOSEKeyboard::AddEffectMode(const char* mode_name, unsigned char value, bool has_brightness, bool has_speed, bool has_color)
@@ -242,7 +249,12 @@ void RGBController_MCHOSEKeyboard::SetupZones()
     keyboard_zone.leds_min      = keyboard_zone.leds_count;
     keyboard_zone.leds_max      = keyboard_zone.leds_count;
 
-    std::vector<unsigned int> map(MCHOSE_G75_PRO_ROWS * MCHOSE_G75_PRO_COLS, 0xFFFFFFFF);
+    unsigned int map[MCHOSE_G75_PRO_ROWS * MCHOSE_G75_PRO_COLS];
+
+    for(unsigned int map_idx = 0; map_idx < MCHOSE_G75_PRO_ROWS * MCHOSE_G75_PRO_COLS; map_idx++)
+    {
+        map[map_idx] = 0xFFFFFFFF;
+    }
 
     for(unsigned int led_idx = 0; led_idx < keyboard_zone.leds_count; led_idx++)
     {
@@ -258,7 +270,7 @@ void RGBController_MCHOSEKeyboard::SetupZones()
         leds.push_back(new_led);
     }
 
-    keyboard_zone.matrix_map.Set(MCHOSE_G75_PRO_ROWS, MCHOSE_G75_PRO_COLS, map.data());
+    keyboard_zone.matrix_map.Set(MCHOSE_G75_PRO_ROWS, MCHOSE_G75_PRO_COLS, map);
 
     zones.push_back(keyboard_zone);
 
@@ -311,7 +323,7 @@ void RGBController_MCHOSEKeyboard::DeviceUpdateMode()
     }
 
     unsigned char brightness = (current.flags & MODE_FLAG_HAS_BRIGHTNESS) ? (unsigned char)current.brightness : MCHOSE_BRIGHTNESS_MAX;
-    unsigned char speed      = (current.flags & MODE_FLAG_HAS_SPEED)      ? (unsigned char)current.speed      : 3;
+    unsigned char speed      = (current.flags & MODE_FLAG_HAS_SPEED)      ? (unsigned char)current.speed      : MCHOSE_SPEED_DEFAULT;
 
     controller->SetMode((unsigned char)current.value, brightness, speed, random);
 }

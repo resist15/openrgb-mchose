@@ -11,13 +11,14 @@
 
 #pragma once
 
+#include <functional>
 #include "MCHOSEKeyboardController.h"
 #include "RGBController.h"
 
 class RGBController_MCHOSEKeyboard : public RGBController
 {
 public:
-    RGBController_MCHOSEKeyboard(MCHOSEKeyboardController* controller_ptr);
+    RGBController_MCHOSEKeyboard(MCHOSEKeyboardController* controller_ptr, std::function<void()> destroy_callback = nullptr);
     ~RGBController_MCHOSEKeyboard();
 
     void        SetupZones();
@@ -30,6 +31,7 @@ public:
 
 private:
     MCHOSEKeyboardController*   controller;
+    std::function<void()>       on_destroy;
 
     void        AddEffectMode(const char* mode_name, unsigned char value, bool has_brightness, bool has_speed, bool has_color);
 };
